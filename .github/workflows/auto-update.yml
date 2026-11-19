@@ -1,0 +1,70 @@
+# auto-update — check the upstream image daily; rebuild only when it changed.
+# This keeps the deployed service current without burning blitz.cloud's
+# 300 build-min/month on empty rebuilds.
+#
+# How it works:
+#   1. Read the upstream image from the Dockerfile's UPSTREAM_IMAGE ARG.
+#   2. Fetch the image's current digest with `crane digest`.
+#   3. Compare with the digest recorded in .upstream-digest.
+#   4. Only if changed: update .upstream-digest and commit. The commit
+#      triggers a rebuild on blitz.cloud (which watches this repo).
+#
+# IMPORTANT (blitz.cloud): by default blitz.cloud does NOT build on pushes
+# from bots / GitHub Actions. Either enable "allow workflow-triggered builds"
+# in the blitz.cloud app settings, or change this workflow to push with a
+# personal access token (PAT) instead of the default GITHUB_TOKEN.
+
+name: Check upstream image update
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # daily at 03:00 UTC
+  workflow_dispatch:  # allow manual run from the Actions tab
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install crane
+        run: |
+          curl -sL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz crane
+          sudo mv crane /usr/local/bin/
+          crane version
+
+      - name: Read upstream image from Dockerfile
+        id: image
+        run: |
+          IMAGE=$(grep -oP '^ARG UPSTREAM_IMAGE=\K.*' Dockerfile | tr -d '\r')
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Upstream image: $IMAGE"
+
+      - name: Fetch current digest
+        id: digest
+        run: |
+          DIGEST=$(crane digest "${{ steps.image.outputs.image }}")
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Current digest: $DIGEST"
+
+      - name: Compare with recorded digest
+        id: compare
+        run: |
+          RECORDED=$(cat .upstream-digest 2>/dev/null | tr -d '[:space:]' || echo "")
+          if [ "$RECORDED" = "${{ steps.digest.outputs.digest }}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Up to date ($RECORDED)."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Update available: $RECORDED -> ${{ steps.digest.outputs.digest }}"
+          fi
+
+      - name: Record new digest and commit
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          echo "${{ steps.digest.outputs.digest }}" > .upstream-digest
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .upstream-digest
+          git commit -m "chore: upstream image ${{ steps.image.outputs.image }} -> ${{ steps.digest.outputs.digest }}"
+          git push
