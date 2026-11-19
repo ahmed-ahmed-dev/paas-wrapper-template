@@ -1,0 +1,28 @@
+# Caddyfile — single-port reverse proxy for the wrapped service.
+# Caddy reads {$VAR} from the environment at startup, so secrets live in
+# the platform's env vars, NEVER in this repo.
+#
+# Per new service, change the two ports below (API port and Web UI port)
+# and the path prefix that needs the API key.
+#
+# Required env vars (set in the platform, e.g. blitz.cloud app settings):
+#   API_KEY — the Bearer token clients must send to reach the API routes.
+
+:8080 {
+    # API routes: require the API key.
+    @api path /v1/* /v1beta/*
+    handle @api {
+        @authed header Authorization "Bearer {$API_KEY}"
+        handle @authed {
+            reverse_proxy 127.0.0.1:3425
+        }
+        handle {
+            respond "Unauthorized" 401
+        }
+    }
+
+    # Everything else -> the service's Web UI.
+    handle {
+        reverse_proxy 127.0.0.1:3430
+    }
+}
